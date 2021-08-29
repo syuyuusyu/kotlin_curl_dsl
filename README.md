@@ -70,9 +70,13 @@ out put like this:
             request {
                 method("post")
                 url("url_for_post")
+                head {
+                    "Content-Type" to "application/json;charset=utf-8"
+                }
                 /**
                  *  in this body function,you can return org.json.JSONObject,org.json.JSONArray
-                 *  String,InputStream or File(for upload),and any classes implements okhttp3.RequestBody
+                 *  String,InputStream or File(for upload),
+                 *  and any classes implements okhttp3.RequestBody
                  */
                 body{
                     json {
