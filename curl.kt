@@ -1,10 +1,15 @@
-package default
+package com.mkh.bqm.base.util
 
+import cn.hutool.extra.spring.SpringUtil
 import com.fasterxml.jackson.core.type.TypeReference
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import io.jsonwebtoken.Jwts
 import kotlinx.coroutines.*
 import okhttp3.*
-import okhttp3.internal.Util
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import okio.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -13,21 +18,17 @@ import java.io.FileInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.net.SocketTimeoutException
+import java.util.*
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * @author syuyuusyu@gmail.com
- * @since 2021-08-24
- * @see https://github.com/syuyuusyu/kotlin_curl_dsl
- */
 
+val defaultOkHttpClient = OkHttpClient.Builder()
+    .readTimeout(3, TimeUnit.MINUTES)
+    .connectTimeout(3,TimeUnit.MINUTES)
+    .build()
 
-val okHttpClient = OkHttpClient.Builder()
-        .readTimeout(2, TimeUnit.MINUTES)
-        .connectTimeout(2,TimeUnit.MINUTES)
-        .build()
 
 fun json(build: JsonObjectBuilder.() -> Unit): JSONObject {
     val builder = JsonObjectBuilder()
@@ -55,15 +56,15 @@ class JsonArrayBuilder{
     }
 }
 
-var objectMapper = ObjectMapper()
-fun <T> jsonToBean(json: String?, clazz: Class<T>): T = try { objectMapper.readValue(json, clazz) } catch (e: Exception) { throw e }
-fun <T> jsonToBean(json: String?, clazz: TypeReference<T>): T = try { objectMapper.readValue(json, clazz) } catch (e: Exception) { throw e }
+var objectMapper = ObjectMapper().registerKotlinModule()
+fun <T> jsonToBean(json: String?, clazz: Class<T>): T = try { objectMapper.readValue(json, clazz) } catch (e: Exception) { println(json); throw e }
+fun <T> jsonToBean(json: String?, clazz: TypeReference<T>): T = try { objectMapper.readValue(json, clazz) } catch (e: Exception) {e.printStackTrace(); throw e }
 
 class ProgressResponse(
-        val responseBody:ResponseBody,
-        val processFun : (loaded:Long, total:Long,done:Boolean)->Unit
+    val responseBody:ResponseBody,
+    val processFun : (loaded:Long, total:Long,done:Boolean)->Unit
 ) :ResponseBody(){
-    var bufferedSource:BufferedSource?=null
+    private var bufferedSource:BufferedSource?=null
 
     override fun contentLength(): Long = responseBody.contentLength()
 
@@ -71,7 +72,7 @@ class ProgressResponse(
 
     override fun source(): BufferedSource {
         if (bufferedSource == null) {
-            bufferedSource = source(responseBody.source())?.let { Okio.buffer(it) };
+            bufferedSource = source(responseBody.source())?.let { it.buffer() };
         }
         return bufferedSource!!;
     }
@@ -96,11 +97,11 @@ class ProgressResponse(
 }
 
 class ProgressRequest(
-        val file: File,
-        val processFun : (loaded:Long, total:Long,done:Boolean)->Unit
+    val file: File,
+    val processFun : (loaded:Long, total:Long,done:Boolean)->Unit
 ):RequestBody(){
     override fun contentType(): MediaType? {
-        return MediaType.parse("application/octet-stream")
+        return "application/octet-stream".toMediaTypeOrNull()
     }
 
     override fun contentLength(): Long {
@@ -115,11 +116,10 @@ class ProgressRequest(
         var source: Source? = null
         val filesize= contentLength()
         try {
-
-            source = Okio.source(file)
+            source = file.source()
             var total: Long = 0
             var read: Long
-            while (source.read(sink.buffer(), 4096).also { read = it } != -1L) {
+            while (source.read(sink.buffer, 4096).also { read = it } != -1L) {
                 total += read
                 sink.flush()
                 processFun(total,filesize,total >= filesize)
@@ -127,7 +127,7 @@ class ProgressRequest(
         } catch (e:SocketTimeoutException){
             throw e
         } finally {
-            Util.closeQuietly(source)
+            source?.close()
         }
     }
 
@@ -147,26 +147,28 @@ class RequestEntity{
     var originFile :File?=null
     lateinit var urlstr: String
     var method = "get"
-
     val request : Request
         get() {
             val build = Request.Builder()
-            method = method.toUpperCase()
+            method = method.uppercase(Locale.getDefault())
             when (method){
                 "GET","HEAD" -> build.method(method,null)
                 "POST","PUT","PATCH" ->
-                    if(body ==null) throw Exception("method $method need requestbody") else build.method(method,body)
+                    if(body ==null) throw Exception("method $method need requestBody") else build.method(method,body)
                 "DELETE" ->  if(body ==null) build.delete() else build.delete(body)
-                else -> throw Exception("unsupport method $method")
+                else -> throw Exception("unsupported method $method")
             }
             var flag = !urlstr.contains("?")
-            params?.map?.forEach {k,v->
+            params?.map?.forEach { (k, v) ->
                 this.urlstr += if(flag) "?$k=$v" else "&$k=$v"
                 flag=false
             }
-            //println(urlstr)
             build.url(urlstr)
-            head?.map?.forEach { k,v-> build.addHeader(k,v as String) }
+            val addMap = HashMap<String,Any>()
+            head?.map?.forEach(addMap::put)
+
+
+            addMap.forEach { (k, v) -> build.addHeader(k,v as String) }
             return build.build()
         }
 
@@ -176,7 +178,7 @@ class RequestEntity{
     }
     fun head(map:Map<String,Any>){
         head = RequestMap()
-        map.forEach { k, v ->
+        map.forEach { (k, v) ->
             head!!.map[k] = v
         }
     }
@@ -191,33 +193,29 @@ class RequestEntity{
         params!!.init()
     }
     fun body(build:()->Any) {
-        val result = build()
-        when (result){
+        when (val result = build()){
             is InputStream -> {
                 val buf = ByteArray(result.available())
-                while (result.read(buf) !== -1);
-                body = RequestBody.create(MediaType.get("application/octet-stream"), buf)
+                while (result.read(buf) != -1)
+                body = buf.toRequestBody("application/octet-stream".toMediaType(), 0, buf.size)
             }
             is File ->{
                 this.originFile = result
                 val input: InputStream = FileInputStream(result)
                 val buf = ByteArray(input.available())
-                while (input.read(buf) !== -1);
-                body = RequestBody.create(MediaType.get("application/octet-stream"),buf)
+                while (input.read(buf) != -1)
+                body = buf.toRequestBody("application/octet-stream".toMediaType(), 0, buf.size)
             }
-            is String -> body = RequestBody.create(MediaType.parse("application/json"),result)
-            is JSONObject -> body = RequestBody.create(MediaType.parse("application/json"),result.toString())
-            is JSONArray -> body = RequestBody.create(MediaType.parse("application/json"),result.toString())
+            is String -> body = result.toRequestBody("application/json".toMediaTypeOrNull())
+            is JSONObject -> body = result.toString().toRequestBody("application/json".toMediaTypeOrNull())
+            is JSONArray -> body = result.toString().toRequestBody("application/json".toMediaTypeOrNull())
             is RequestBody -> body = result
         }
-        //println("request body:")
-        //println(result)
     }
-
 }
 
 class CurlEntity{
-    var client = okHttpClient
+    var client = defaultOkHttpClient
     lateinit var request : Request
     lateinit var response: Response
     lateinit var requestEntity: RequestEntity
@@ -245,7 +243,7 @@ class CurlEntity{
     }
 }
 
-class CurlEvent(): CoroutineScope by CoroutineScope(Dispatchers.Default) {
+class CurlEvent(): CoroutineScope by CoroutineScope(Dispatchers.IO) {
 
     enum class ProcessCode{beforeCall,faterCall}
 
@@ -282,17 +280,17 @@ class CurlEvent(): CoroutineScope by CoroutineScope(Dispatchers.Default) {
     fun threadPool(threadFun:()->Executor){
         this.threadPool = threadFun()
     }
-    fun  onWacth(watchFun:(readline:String)->Unit)  {
+    fun onWacth(watchFun:(readline:String)->Unit)  {
         if(code != ProcessCode.faterCall){
             return
         }
-        source = response.body()?.source()
+        source = response.body?.source()
         watchRunning.set(true)
 
         var job:Job?=null
         job = launch(threadPool?.asCoroutineDispatcher() ?: Dispatchers.Default) {
             while (watchRunning.get()){
-                response.body()?.source()
+                response.body?.source()
                 try {
                     val line = source?.readUtf8Line()
                     if (line != null) {
@@ -303,18 +301,16 @@ class CurlEvent(): CoroutineScope by CoroutineScope(Dispatchers.Default) {
                         println("source exhausted")
                         close()
                     }
-
                 }catch (e:Exception){
                     e.printStackTrace()
                     close()
                 }
             }
         }
-
     }
     fun readStream(inputfun:(input:ByteArray)->Unit){
         if(code != ProcessCode.faterCall) return
-        inputStream = response.body()?.byteStream()!!
+        inputStream = response.body?.byteStream()!!
         readStreamRunning.set(true)
         launch(threadPool?.asCoroutineDispatcher() ?: Dispatchers.Default) {
             while (readStreamRunning.get()){
@@ -333,8 +329,8 @@ class CurlEvent(): CoroutineScope by CoroutineScope(Dispatchers.Default) {
         this.curlEntity.client = this.curlEntity.client.newBuilder().addNetworkInterceptor { chain: Interceptor.Chain ->
             val originalResponse = chain.proceed(chain.request())
             originalResponse.newBuilder()
-                    .body(ProgressResponse(originalResponse.body()!!, processFun))
-                    .build()
+                .body(ProgressResponse(originalResponse.body!!, processFun))
+                .build()
         }.build()
     }
     fun onUploadProgress(processFun : (loaded:Long, total:Long,done:Boolean)->Unit){
@@ -353,7 +349,7 @@ fun request(init: RequestEntity.() -> Unit): Request {
     return en.request
 }
 
-fun  curl(exec: CurlEntity.()->Unit) :Any{
+fun curl(exec: CurlEntity.()->Unit) :Any{
     var result :Any
     val entity = CurlEntity()
     entity.exec()
@@ -381,16 +377,51 @@ fun  curl(exec: CurlEntity.()->Unit) :Any{
     }
     result = response
     entity.returnType?.let {
-        try {
+        result = try {
             when (it) {
-                is TypeReference<*> ->  result=  jsonToBean(response.body()?.string(), it)
-                is Class<*> -> result = jsonToBean(response.body()?.string(), it)
-                else -> throw Exception("unknow return type $it")
+                is TypeReference<*> -> jsonToBean(response.body?.string(), it)
+                is Class<*> -> jsonToBean(response.body?.string(), it)
+                else -> throw Exception("unknown return type $it")
+            }.also {
+                response.body?.close()
+                response.close()
             }
         }catch (e:Exception){
             e.printStackTrace()
-            result = Any()
+            Any()
+        }finally {
+            response.body?.close()
+            response.close()
         }
     }
     return result
 }
+
+fun <T> curl(clazz: TypeReference<T>,exec: CurlEntity.()->Unit) :T {
+    val entity = CurlEntity()
+    entity.exec()
+    val call: Call = entity.client.newCall(entity.request)
+    val response = call.execute()
+    entity.response = response
+    val str = response.body?.string()
+    //println(str)
+    return jsonToBean(str, clazz).also {
+        response.body?.close()
+        response.close()
+    }
+}
+
+fun <T> curl(clazz: Class<T>,exec: CurlEntity.()->Unit) :T {
+    val entity = CurlEntity()
+    entity.exec()
+    val call: Call = entity.client.newCall(entity.request)
+    val response = call.execute()
+    entity.response = response
+    return jsonToBean(response.body?.string(), clazz).also {
+        response.body?.close()
+        response.close()
+    }
+}
+
+
+
